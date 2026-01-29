@@ -24,17 +24,17 @@ load_dotenv()  # Load API Key dari file .env
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # URL Video yang ingin diedit
-YOUTUBE_URL = "https://www.youtube.com/watch?v=1ziIpehWMiI" 
-JUMLAH_KLIP = 3
+YOUTUBE_URL = "https://www.youtube.com/watch?v=wCed6dmcHR0"
+JUMLAH_KLIP = 10
 
 # Konfigurasi Subtitle
 FONT_SIZE = 70
-FONT_COLOR = '#FFD700' 
+FONT_COLOR = '#FFD700'
 FONT_COLOR_ALT = 'white'
 STROKE_COLOR = 'black'
 STROKE_WIDTH = 3
 # Pastikan font ini ada di sistem kamu, atau ganti dengan 'Arial-Bold'
-FONT_TYPE = 'Arial-Bold' 
+FONT_TYPE = 'Arial-Bold'
 POSISI_TEKS_Y = 0.75 # 75% dari tinggi video (bisa diatur pixel misal 1100)
 
 # ==========================================
@@ -68,18 +68,21 @@ def download_video(url):
     if os.path.exists(output_path): os.remove(output_path)
 
     ydl_opts = {
-        'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]',
+        # Format 18 = progressive MP4 (360p) - sudah combined video+audio
+        # Format 22 = progressive MP4 (720p) - sudah combined video+audio
+        # Progressive format tidak butuh FFmpeg untuk merge
+        'format': '22/18/best',
         'outtmpl': f"{TEMP_DIR}/raw_video.%(ext)s",
         'merge_output_format': 'mp4',
         'quiet': True,
-        'no_warnings': True
+        'no_warnings': True,
     }
-    
+
     try:
         log_info(f"Mendownload Video: {url}")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
-            
+
         # Rename file hasil download ke source_video.mp4
         # yt-dlp kadang menamai file raw_video.mp4 atau raw_video.webm.mp4
         for file in os.listdir(TEMP_DIR):
@@ -94,7 +97,7 @@ def download_video(url):
 def transcribe_full(audio_path):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     log_info(f"Engine Transkripsi berjalan di: {device.upper()}")
-    
+
     try:
         model = whisper.load_model("base", device=device)
         result = model.transcribe(audio_path, language='id', task='transcribe', fp16=False, word_timestamps=True)
@@ -110,14 +113,14 @@ def analyze_hooks_with_groq(transcript_text, num_clips):
     prompt = f"""
     You are a professional Video Editor. Analyze this transcript.
     Find exactly {num_clips} viral segments for TikTok (30-60 seconds each).
-    
+
     CRITERIA:
     1. Must have a strong hook.
     2. Must be self-contained context.
-    
+
     TRANSCRIPT:
     {safe_text} ... (truncated)
-    
+
     OUTPUT STRICT JSON ONLY:
     [
       {{ "start": 120.0, "end": 160.0, "title": "Judul_Klip_1" }},
@@ -137,7 +140,7 @@ def analyze_hooks_with_groq(transcript_text, num_clips):
         )
         result_content = chat_completion.choices[0].message.content
         data = json.loads(result_content)
-        
+
         if isinstance(data, list): return data
         if isinstance(data, dict):
             for k, v in data.items():
@@ -188,7 +191,7 @@ def process_single_clip(source_video, start_t, end_t, clip_name, segment_words):
         cap = cv2.VideoCapture(temp_sub)
         fps = cap.get(cv2.CAP_PROP_FPS)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        
+
         centers = []
         while True:
             ret, frame = cap.read()
@@ -217,11 +220,11 @@ def process_single_clip(source_video, start_t, end_t, clip_name, segment_words):
             h, w = img.shape[:2]
             # Rasio 9:16
             target_width = int(h * 9/16)
-            
+
             # Hitung koordinat crop (pastikan tidak keluar batas gambar)
             x1 = int(cx - target_width/2)
             x1 = max(0, min(w - target_width, x1))
-            
+
             return img[:, x1:x1+target_width]
 
         final_clip = clip.fl(crop_fn, apply_to=['mask']).resize(height=1920) # Resize ke 1080x1920
@@ -250,17 +253,17 @@ def process_single_clip(source_video, start_t, end_t, clip_name, segment_words):
         # Output
         safe_name = "".join([c for c in clip_name if c.isalnum() or c=='_'])
         output_filename = f"{OUT_DIR}/{safe_name}.mp4"
-        
+
         # Menggunakan preset ultrafast agar render cepat, threads disesuaikan CPU
         final.write_videofile(output_filename, codec='libx264', audio_codec='aac', fps=24, preset='fast', threads=4, logger=None)
-        
+
         full_clip.close()
         final.close()
-        
+
         # Hapus temp file per klip
         if os.path.exists(temp_sub): os.remove(temp_sub)
         log_success(f"Disimpan: {output_filename}")
-        
+
     except Exception as e:
         log_error(f"Gagal memproses klip {clip_name}: {e}")
 
@@ -299,7 +302,7 @@ def main():
         return
 
     log_success(f"Ditemukan {len(clips_data)} Klip!")
-    
+
     # 4. Proses Editing
     for i, data in enumerate(clips_data):
         print(f"\n🎬 Memproses Klip {i+1}/{len(clips_data)}: {data.get('title')}")
