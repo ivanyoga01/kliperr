@@ -203,7 +203,7 @@ class AIAutoShortsApp(ctk.CTk):
         # Auto info label
         self.auto_clip_info = ctk.CTkLabel(
             clip_frame,
-            text="(1 klip per 5 menit video)",
+            text="",
             text_color="gray",
             font=ctk.CTkFont(size=11)
         )
@@ -616,17 +616,43 @@ class AIAutoShortsApp(ctk.CTk):
             self.log("INFO", f"Using device: {device.upper()}")
 
             model = whisper.load_model("base", device=device)
-            whisper_result = model.transcribe(audio_path, language='id', task='transcribe', fp16=False, word_timestamps=True)
+            # language=None untuk auto-detect, task='transcribe' untuk transkripsi bahasa asli
+            whisper_result = model.transcribe(
+                audio_path,
+                language=None,  # Auto-detect language
+                task='transcribe',  # 'transcribe' = bahasa asli, 'translate' = terjemah ke English
+                fp16=False,
+                word_timestamps=True  # Enable per-word timing for subtitles
+            )
 
             if not whisper_result:
                 self.log("ERROR", "Transcription failed!")
                 self.after(0, self.processing_finished)
                 return
 
+            # Log detected language
+            detected_lang = whisper_result.get('language', 'unknown')
+            self.log("INFO", f"Detected language: {detected_lang.upper()}")
+
             full_text = ""
             for seg in whisper_result['segments']:
-                full_text += f"[{seg['start']:.1f}] {seg['text']}\n"
+                full_text += f"[{seg['start']:.1f}s - {seg['end']:.1f}s] {seg['text']}\n"
             all_words = [w for seg in whisper_result['segments'] for w in seg['words']]
+
+            # Save transcript to file with word timestamps
+            transcript_file = f"{output_dir}/transcript.txt"
+            with open(transcript_file, 'w', encoding='utf-8') as f:
+                f.write(f"=== WHISPER TRANSCRIPT ===\n")
+                f.write(f"Language: {detected_lang.upper()}\n\n")
+                f.write("--- SEGMENTS ---\n")
+                f.write(full_text)
+                f.write(f"\n--- WORD TIMESTAMPS (for subtitle) ---\n")
+                for word in all_words[:50]:  # First 50 words as sample
+                    f.write(f"[{word['start']:.2f} - {word['end']:.2f}] {word.get('word', word.get('text', ''))}\n")
+                if len(all_words) > 50:
+                    f.write(f"... and {len(all_words) - 50} more words\n")
+                f.write(f"\n=== TOTAL WORDS: {len(all_words)} ===\n")
+            self.log("INFO", f"Transcript saved to: {transcript_file}")
 
             self.log("SUCCESS", f"Transcription complete! {len(all_words)} words detected")
 
@@ -666,7 +692,7 @@ class AIAutoShortsApp(ctk.CTk):
                     source_path,
                     float(data['start']),
                     float(data['end']),
-                    f"Short_{i+1}_{clip_name}",
+                    clip_name,  # Use hookable title from AI as filename
                     all_words,
                     config,
                     temp_dir,
@@ -730,28 +756,46 @@ class AIAutoShortsApp(ctk.CTk):
         safe_text = transcript_text[:25000]
 
         prompt = f"""
-        You are a professional Video Editor. Analyze this transcript.
-        Find exactly {num_clips} viral segments for TikTok/YouTube Shorts.
+        You are a professional Video Editor specialized in creating viral short-form content.
+        Analyze this transcript and find exactly {num_clips} compelling segments for TikTok/YouTube Shorts.
 
-        STRICT DURATION RULES:
-        - MINIMUM duration: 30 seconds
-        - MAXIMUM duration: 60 seconds
-        - Each clip MUST be between 30-60 seconds
-        - Do NOT create clips shorter than 30 seconds
+        DURATION RULES:
+        - Each clip MUST be 30-60 seconds long
+        - Duration = end - start must be between 30 and 60 seconds
 
-        CRITERIA:
-        1. Must have a strong hook in the first 5 seconds.
-        2. Must be self-contained context.
-        3. Each segment duration = end - start must be >= 30 and <= 60 seconds.
+        CUTTING RULES (VERY IMPORTANT):
+        - Use the EXACT timestamps from the transcript to determine start/end points
+        - START each clip at the BEGINNING of a sentence (use the start timestamp of that line)
+        - END each clip at the END of a complete sentence (use the end timestamp of that line)
+        - NEVER cut in the middle of a sentence
+        - Look for natural pauses, transitions, or topic changes between lines
+
+        CONTENT CRITERIA:
+        1. Strong hook in first 3-5 seconds (question, bold statement, surprising fact)
+        2. Self-contained context - viewer should understand without prior context
+        3. Emotional impact or valuable information
+        4. Clear beginning and satisfying ending
+
+        TRANSCRIPT FORMAT: [start_time - end_time] text
+        Each line shows when that sentence starts and ends.
 
         TRANSCRIPT:
-        {safe_text} ... (truncated)
+        {safe_text}
 
-        OUTPUT STRICT JSON ONLY (ensure end - start is between 30 and 60 for each):
+        OUTPUT FORMAT - Return STRICT JSON ONLY:
         [
-          {{ "start": 120.0, "end": 165.0, "title": "Judul_Klip_1" }},
-          {{ "start": 300.5, "end": 350.0, "title": "Judul_Klip_2" }}
+          {{ "start": 120.0, "end": 165.0, "title": "Rahasia Sukses Terungkap" }},
+          {{ "start": 300.5, "end": 350.0, "title": "Jangan Lakukan Ini" }}
         ]
+
+        TITLE RULES:
+        - Create CATCHY, HOOKABLE titles that make people want to watch
+        - Use Indonesian language for titles
+        - Use NORMAL SPACES between words (NOT underscores)
+        - Keep titles short (3-6 words)
+        - Examples: "Rahasia Sukses Terungkap", "Jangan Lakukan Ini", "Fakta Mengejutkan"
+
+        Make sure each segment starts and ends at natural speech boundaries!
         """
 
         try:
@@ -978,8 +1022,11 @@ class AIAutoShortsApp(ctk.CTk):
 
             final = CompositeVideoClip([final_clip] + subs)
 
-            # Output
-            safe_name = "".join([c for c in clip_name if c.isalnum() or c == '_'])
+            # Output - replace spaces with underscores for filename
+            safe_name = "".join([c if c.isalnum() else '_' for c in clip_name]).strip('_')
+            # Remove multiple consecutive underscores
+            while '__' in safe_name:
+                safe_name = safe_name.replace('__', '_')
             output_filename = f"{output_dir}/{safe_name}.mp4"
 
             final.write_videofile(
